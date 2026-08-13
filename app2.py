@@ -5,7 +5,7 @@ import pandas as pd
 # Page setup
 st.set_page_config(page_title="Global Earth Temperature Dashboard", page_icon="🌍", layout="centered")
 
-st.title("🌍 Earth Temperature Data Dashboard")
+st.title("🌍 Earth Temperature Data Dashboard by R. Nimisha")
 st.write("Fetch real-time and forecast temperature data for any location using the open-source **Open-Meteo API**.")
 
 # Sidebar - Location input
