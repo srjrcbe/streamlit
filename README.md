@@ -1,1 +1,1 @@
-weather python app
+weather app
