@@ -1,89 +1,152 @@
-import streamlit as st
-import requests
+import datetime
+import time
 import pandas as pd
+import plotly.express as px
+import requests
+import streamlit as st
 
-# Page setup
-st.set_page_config(page_title="Global Earth Temperature Dashboard", page_icon="🌍", layout="centered")
+# Set page configuration
+st.set_page_config(
+    page_title="World Population Clock by R nimisha",
+    page_icon="🌍",
+    layout="wide",
+)
 
-st.title("🌍 Earth Temperature Data Dashboard by R. Nimisha")
-st.write("Fetch real-time and forecast temperature data for any location using the open-source **Open-Meteo API**.")
 
-# Sidebar - Location input
-st.sidebar.header("📍 Location Settings")
+# Fetch base population data from World Bank API
+@st.cache_data(ttl=86400)  # Cache API call for 24 hours
+def get_world_bank_population():
+    """Fetches total global population and country-level population data from World Bank API."""
+    try:
+        # World Bank API for global total population (Indicator: SP.POP.TOTL)
+        world_url = "https://api.worldbank.org/v2/country/WLD/indicator/SP.POP.TOTL?format=json&per_page=5"
+        world_response = requests.get(world_url, timeout=10).json()
 
-# Preset popular cities or manual coordinate entry
-cities = {
-    "London": (51.5074, -0.1278),
-    "New York": (40.7128, -74.0060),
-    "Tokyo": (35.6762, 139.6503),
-    "Sydney": (-33.8688, 151.2093),
-    "São Paulo": (-23.5505, -46.6333),
-    "Custom": None
-}
+        # Extract most recent available estimate
+        world_data = world_response[1]
+        latest_world_entry = next(
+            item for item in world_data if item["value"] is not None
+        )
+        base_population = latest_world_entry["value"]
+        base_year = int(latest_world_entry["date"])
 
-selected_city = st.sidebar.selectbox("Choose a preset city:", list(cities.keys()))
+        # World Bank API for country-level populations
+        countries_url = "https://api.worldbank.org/v2/country/all/indicator/SP.POP.TOTL?format=json&per_page=300&date=2022"
+        countries_response = requests.get(countries_url, timeout=10).json()
 
-if selected_city == "Custom":
-    lat = st.sidebar.number_input("Latitude", value=0.0, format="%.4f")
-    lon = st.sidebar.number_input("Longitude", value=0.0, format="%.4f")
-else:
-    lat, lon = cities[selected_city]
-    st.sidebar.write(f"**Latitude:** {lat}, **Longitude:** {lon}")
+        country_list = []
+        if len(countries_response) > 1:
+            for entry in countries_response[1]:
+                # Exclude regional aggregates (keep individual countries)
+                if entry["value"] and entry["countryiso3code"]:
+                    country_list.append(
+                        {
+                            "Country": entry["country"]["value"],
+                            "ISO3": entry["countryiso3code"],
+                            "Population": entry["value"],
+                        }
+                    )
 
-temp_unit = st.sidebar.radio("Temperature Unit", ["Celsius (°C)", "Fahrenheit (°F)"])
-unit_param = "celsius" if "Celsius" in temp_unit else "fahrenheit"
-unit_symbol = "°C" if unit_param == "celsius" else "°F"
+        df = pd.DataFrame(country_list)
+        df = df.sort_values(by="Population", ascending=False).reset_index(
+            drop=True
+        )
 
-# API Call Function
-@st.cache_data(ttl=600)  # Cache data for 10 minutes
-def fetch_temperature_data(latitude, longitude, unit):
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "current_weather": True,
-        "hourly": "temperature_2m",
-        "temperature_unit": unit,
-        "timezone": "auto"
-    }
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        st.error(f"Error fetching data from API (Status Code: {response.status_code})")
-        return None
+        return base_population, base_year, df
 
-# Load Data
-with st.spinner("Fetching temperature data..."):
-    data = fetch_temperature_data(lat, lon, unit_param)
+    except Exception as e:
+        # Fallback values if API is unavailable
+        st.warning(f"Could not reach API ({e}). Using estimated fallback data.")
+        fallback_df = pd.DataFrame(
+            [
+                {"Country": "India", "ISO3": "IND", "Population": 1428627663},
+                {"Country": "China", "ISO3": "CHN", "Population": 1411750000},
+                {
+                    "Country": "United States",
+                    "ISO3": "USA",
+                    "Population": 333287557,
+                },
+                {"Country": "Indonesia", "ISO3": "IDN", "Population": 275501339},
+                {"Country": "Pakistan", "ISO3": "PAK", "Population": 235824862},
+            ]
+        )
+        return 8_000_000_000, 2023, fallback_df
 
-if data:
-    # Display Current Weather Metrics
-    current = data.get("current_weather", {})
-    current_temp = current.get("temperature", "N/A")
-    wind_speed = current.get("windspeed", "N/A")
 
-    st.subheader("Current Conditions")
-    col1, col2 = st.columns(2)
-    col1.metric(label="Current Temperature", value=f"{current_temp} {unit_symbol}")
-    col2.metric(label="Wind Speed", value=f"{wind_speed} km/h")
+# Load data
+base_pop, base_year, country_df = get_world_bank_population()
 
-    st.markdown("---")
+# Estimated global growth rate (~0.88% annual growth, approx. 2.23 people per second)
+GROWTH_RATE_PER_SEC = 2.23
 
-    # Display Hourly Temperature Chart
-    st.subheader("Hourly Temperature Forecast")
-    hourly_data = data.get("hourly", {})
-    
-    if "time" in hourly_data and "temperature_2m" in hourly_data:
-        df = pd.DataFrame({
-            "Time": pd.to_datetime(hourly_data["time"]),
-            f"Temperature ({unit_symbol})": hourly_data["temperature_2m"]
-        })
-        df.set_index("Time", inplace=True)
+# Calculate current estimate based on elapsed seconds since base year
+base_datetime = datetime.datetime(base_year, 1, 1, tzinfo=datetime.timezone.utc)
+now_utc = datetime.datetime.now(datetime.timezone.utc)
+elapsed_seconds = (now_utc - base_datetime).total_seconds()
+current_estimated_pop = int(base_pop + (elapsed_seconds * GROWTH_RATE_PER_SEC))
 
-        # Plot line chart
-        st.line_chart(df)
+# --- UI Header ---
+st.title("🌍 Real-Time World Population Dashboard")
+st.markdown(
+    f"*Source data anchored from **World Bank API** baseline ({base_year}) with real-time growth modeling.*"
+)
 
-        # Show Raw Data toggle
-        if st.checkbox("Show Raw Data Table"):
-            st.dataframe(df)
+# --- Top Section: Live Ticking Metric ---
+st.subheader("Estimated Current Global Population")
+metric_placeholder = st.empty()
+
+# Render live ticker metric
+metric_placeholder.metric(
+    label="Live Estimated World Population",
+    value=f"{current_estimated_pop:,}",
+    delta=f"+{GROWTH_RATE_PER_SEC:.2f} per sec",
+)
+
+st.divider()
+
+# --- Main Dashboard Tabs ---
+tab1, tab2 = st.tabs(["📊 Global Distribution", "🔝 Top Countries"])
+
+with tab1:
+    st.subheader("World Population Map")
+
+    # Choropleth map using Plotly Express
+    fig_map = px.choropleth(
+        country_df,
+        locations="ISO3",
+        color="Population",
+        hover_name="Country",
+        color_continuous_scale=px.colors.sequential.Plasma,
+        title="Country Population Distribution",
+    )
+    fig_map.update_layout(margin={"r": 0, "t": 40, "l": 0, "b": 0})
+    st.plotly_chart(fig_map, use_container_width=True)
+
+with tab2:
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.subheader("Top 10 Most Populous Countries")
+        top_10 = country_df.head(10)
+        fig_bar = px.bar(
+            top_10,
+            x="Population",
+            y="Country",
+            orientation="h",
+            color="Population",
+            color_continuous_scale="Blues",
+        )
+        fig_bar.update_layout(yaxis={"categoryorder": "total ascending"})
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    with col2:
+        st.subheader("Data Table")
+        st.dataframe(
+            country_df[["Country", "Population"]],
+            use_container_width=True,
+            height=400,
+        )
+
+# Auto-refresh loop for real-time ticking clock effect
+time.sleep(1)
+st.rerun()
